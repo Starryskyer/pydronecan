@@ -147,9 +147,10 @@ class HandlerDispatcher(object):
         self._catch_exceptions = catch_exceptions
 
     def add_handler(self, dronecan_type, handler, **kwargs):
-        service = False
-        if dronecan_type is not None and dronecan_type.kind == dronecan_type.KIND_SERVICE:
-            service = True
+        service = {
+            dronecan_type.KIND_SERVICE: True,
+            dronecan_type.KIND_MESSAGE: False
+        }[dronecan_type.kind]
 
         # If handler is a class, create a wrapper function and register it as a regular callback
         if inspect.isclass(handler):
@@ -189,7 +190,7 @@ class HandlerDispatcher(object):
 
     def call_handlers(self, transfer):
         for dronecan_type, wrapper in self._handlers:
-            if dronecan_type is None or dronecan_type == get_dronecan_data_type(transfer.payload):
+            if dronecan_type == get_dronecan_data_type(transfer.payload):
                 try:
                     wrapper(transfer)
                 # noinspection PyBroadException
@@ -225,7 +226,6 @@ class TransferHookDispatcher(object):
 class Node(Scheduler):
     def __init__(self, can_driver, node_id=None, node_status_interval=None,
                  mode=None, node_info=None, catch_handler_exceptions=True,
-                 send_canfd=False,
                  **_extras):
         """
         It is recommended to use make_node() rather than instantiating this type directly.
@@ -251,7 +251,6 @@ class Node(Scheduler):
 
         self._can_driver = can_driver
         self._node_id = node_id
-        self._send_canfd = send_canfd
 
         self._transfer_manager = transport.TransferManager()
         self._outstanding_requests = {}
@@ -279,10 +278,6 @@ class Node(Scheduler):
         self.node_info = node_info or dronecan.uavcan.protocol.GetNodeInfo.Response()     # @UndefinedVariable
         self.add_handler(dronecan.uavcan.protocol.GetNodeInfo, on_get_node_info)          # @UndefinedVariable
 
-    def set_canfd(self, send_canfd):
-        '''change default send of CANFD'''
-        self._send_canfd = send_canfd
-
     @property
     def is_anonymous(self):
         return (self._node_id or 0) == 0
@@ -309,7 +304,7 @@ class Node(Scheduler):
         if not raw_frame.extended:
             return
 
-        frame = transport.Frame(raw_frame.id, raw_frame.data, raw_frame.ts_monotonic, raw_frame.ts_real, raw_frame.canfd)
+        frame = transport.Frame(raw_frame.id, raw_frame.data, raw_frame.ts_monotonic, raw_frame.ts_real)
 
         transfer_frames = self._transfer_manager.receive_frame(frame)
         if not transfer_frames:
@@ -426,11 +421,8 @@ class Node(Scheduler):
                     break
             self._poll_scheduler_and_get_next_deadline()
 
-    def request(self, payload, dest_node_id, callback, priority=None, timeout=None, canfd=None):
+    def request(self, payload, dest_node_id, callback, priority=None, timeout=None):
         self._throw_if_anonymous()
-
-        if canfd is None:
-            canfd = self._send_canfd
 
         # Preparing the transfer
         transfer_id = self._next_transfer_id((get_dronecan_data_type(payload).default_dtid, dest_node_id))
@@ -440,15 +432,14 @@ class Node(Scheduler):
                                       transfer_id=transfer_id,
                                       transfer_priority=priority or DEFAULT_TRANSFER_PRIORITY,
                                       service_not_message=True,
-                                      request_not_response=True,
-                                      canfd=canfd)
+                                      request_not_response=True)
 
         # Calling hooks
         self._transfer_hook_dispatcher.call_hooks(self._transfer_hook_dispatcher.TRANSFER_DIRECTION_OUTGOING, transfer)
 
         # Sending the transfer
         for frame in transfer.to_frames():
-            self._can_driver.send(frame.message_id, frame.bytes, extended=True, canfd=canfd)
+            self._can_driver.send(frame.message_id, frame.bytes, extended=True)
 
         # Registering a callback that will be invoked if there was no response after 'timeout' seconds
         def on_timeout():
@@ -476,11 +467,8 @@ class Node(Scheduler):
 
         logger.debug("Node.request(dest_node_id={0:d}): sent {1!r}".format(dest_node_id, payload))
 
-    def respond(self, payload, dest_node_id, transfer_id, priority, canfd=None):
+    def respond(self, payload, dest_node_id, transfer_id, priority):
         self._throw_if_anonymous()
-
-        if canfd is None:
-            canfd = self._send_canfd
 
         transfer = transport.Transfer(
             payload=payload,
@@ -489,36 +477,31 @@ class Node(Scheduler):
             transfer_id=transfer_id,
             transfer_priority=priority,
             service_not_message=True,
-            request_not_response=False,
-            canfd=canfd
+            request_not_response=False
         )
 
         self._transfer_hook_dispatcher.call_hooks(self._transfer_hook_dispatcher.TRANSFER_DIRECTION_OUTGOING, transfer)
 
         for frame in transfer.to_frames():
-            self._can_driver.send(frame.message_id, frame.bytes, extended=True, canfd=canfd)
+            self._can_driver.send(frame.message_id, frame.bytes, extended=True)
 
         logger.debug("Node.respond(dest_node_id={0:d}, transfer_id={0:d}, priority={0:d}): sent {1!r}"
                      .format(dest_node_id, transfer_id, priority, payload))
 
-    def broadcast(self, payload, priority=None, canfd=None):
+    def broadcast(self, payload, priority=None):
         self._throw_if_anonymous()
 
-        if canfd is None:
-            canfd = self._send_canfd
-        
         transfer_id = self._next_transfer_id(get_dronecan_data_type(payload).default_dtid)
         transfer = transport.Transfer(payload=payload,
                                       source_node_id=self._node_id,
                                       transfer_id=transfer_id,
                                       transfer_priority=priority or DEFAULT_TRANSFER_PRIORITY,
-                                      service_not_message=False,
-                                      canfd=canfd)
+                                      service_not_message=False)
 
         self._transfer_hook_dispatcher.call_hooks(self._transfer_hook_dispatcher.TRANSFER_DIRECTION_OUTGOING, transfer)
 
         for frame in transfer.to_frames():
-            self._can_driver.send(frame.message_id, frame.bytes, extended=True, canfd=canfd)
+            self._can_driver.send(frame.message_id, frame.bytes, extended=True)
 
     def close(self):
         self._can_driver.close()

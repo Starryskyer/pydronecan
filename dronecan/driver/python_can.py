@@ -39,8 +39,6 @@ else:
                 if channel is None:
                     self._bus = can.interface.Bus() # get bus from environment's config file
                 else:
-                    if not hasattr(_extras,'bustype'):
-                        _extras['bustype'] = 'socketcan'
                     self._bus = can.interface.Bus(channel=channel, bustype=_extras['bustype'], bitrate=_extras['bitrate'])
             except Exception as ex:
                 logger.exception("Could not instantiate a python-can driver")
@@ -152,9 +150,7 @@ else:
             except Exception as ex:
                 logger.error("Receive exception", exc_info=True)
 
-        def send(self, message_id, message, extended=False, canfd=False):
-            if canfd:
-                raise DriverError('CANFD not supported by PythonCAN')
+        def send(self, message_id, message, extended=False):
             self._check_write_feedback()
             try:
                 self._write_queue.put_nowait(CANFrame(message_id, message, extended))

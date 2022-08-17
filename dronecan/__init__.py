@@ -126,19 +126,8 @@ def load_dsdl(*paths, **args):
             dsdl_path = pkg_resources.resource_filename(__name__, "dsdl_specs")  # @UndefinedVariable
             # check if we are a package, if not directly use relative DSDL path
             if not os.path.exists(dsdl_path):
-                DSDL_paths = [ "../../DSDL", "../../../../../DroneCAN/DSDL" ]
-                for p in DSDL_paths:
-                    dpath = os.path.join(os.path.dirname(__file__), p)
-                    if os.path.exists(dpath):
-                        dsdl_path = dpath
-                        break
-            if not os.path.exists(dsdl_path):
-                raise UAVCANException('failed to find DSDL path')
-            paths = [os.path.join(dsdl_path, "uavcan"),
-                     os.path.join(dsdl_path, "dronecan"),
-                     os.path.join(dsdl_path, "ardupilot"),
-                     os.path.join(dsdl_path, "com"),
-                     os.path.join(dsdl_path, "cuav")] + paths
+                dsdl_path = os.path.join(os.path.dirname(__file__), "../../DSDL")
+            paths = [os.path.join(dsdl_path, "uavcan"), os.path.join(dsdl_path, "dronecan")] + paths
             custom_path = os.path.join(os.path.expanduser("~"), "uavcan_vendor_specific_types")
             if os.path.isdir(custom_path):
                 paths += [f for f in [os.path.join(custom_path, f) for f in os.listdir(custom_path)]
@@ -180,19 +169,22 @@ def load_dsdl(*paths, **args):
             dtype.Request = create_instance_closure(dtype, _mode='request')
             dtype.Response = create_instance_closure(dtype, _mode='response')
 
-    toplevel = ['dronecan', 'uavcan', 'ardupilot', 'com', 'cuav']
-    for n in toplevel:
-        namespace = root_namespace._path(n)
-        MODULE.__dict__[n] = Namespace()
-        for top_namespace in namespace._namespaces():
-            MODULE.__dict__[n].__dict__[str(top_namespace)] = namespace.__dict__[top_namespace]
+    namespace = root_namespace._path("dronecan")
+    for top_namespace in namespace._namespaces():
+        MODULE.__dict__[str(top_namespace)] = namespace.__dict__[top_namespace]
+
+    namespace = root_namespace._path("uavcan")
+    MODULE.__dict__["uavcan"] = Namespace()
+    for top_namespace in namespace._namespaces():
+        MODULE.uavcan.__dict__[str(top_namespace)] = namespace.__dict__[top_namespace]
 
     MODULE.__dict__["thirdparty"] = Namespace()
     for ext_namespace in root_namespace._namespaces():
         if str(ext_namespace) != "uavcan":
             # noinspection PyUnresolvedReferences
             MODULE.thirdparty.__dict__[str(ext_namespace)] = root_namespace.__dict__[ext_namespace]
-            
+
+
 __all__ = ["dsdl", "transport", "load_dsdl", "DATATYPES", "TYPENAMES"]
 
 

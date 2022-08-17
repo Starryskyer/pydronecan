@@ -17,7 +17,6 @@ import select
 import multiprocessing
 import threading
 import copy
-import time
 from logging import getLogger
 from .common import DriverError, TxQueueFullError, CANFrame, AbstractDriver
 from .timestamp_estimator import TimestampEstimator
@@ -82,84 +81,7 @@ MAX_SUCCESSIVE_ERRORS_TO_GIVE_UP = 1000
 IPC_SIGNAL_INIT_OK = 'init_ok'                     # Sent from IO process to the parent process when init is done
 IPC_COMMAND_STOP = 'stop'                          # Sent from parent process to the IO process when it's time to exit
 
-class RetrySerial(object):
-    def __init__(self, device, baudrate, bitrate):
-        self.conn = serial.Serial(device, baudrate)
-        self.device = device
-        self.baudrate = baudrate
-        self.bitrate = bitrate
-        self.timeout = 0
-        self.lock = threading.RLock()
 
-    def retry(self):
-        logger.info("Reopening %s at %u" % (self.device, self.baudrate))
-        time.sleep(1)
-        self.lock.acquire()
-        try:
-            self.conn.close()
-        except Exception:
-            pass
-        try:
-            self.conn = serial.Serial(self.device, self.baudrate)
-            self.conn.timeout = self.timeout
-            _init_adapter(self.conn, self.bitrate)
-            logger.info("Reopen OK")
-        except Exception as ex:
-            logger.info("Reopen failed", ex)
-            pass
-        self.lock.release()
-
-    def read(self, n):
-        while True:
-            try:
-                self.conn.timeout = self.timeout
-                return self.conn.read(n)
-            except Exception as ex:
-                self.retry()
-                pass
-
-    def write(self, b):
-        while True:
-            try:
-                return self.conn.write(b)
-            except Exception as ex:
-                self.retry()
-                pass
-
-    def flush(self):
-        while True:
-            try:
-                return self.conn.flush()
-            except Exception:
-                self.retry()
-                pass
-
-    def fileno(self):
-        while True:
-            try:
-                return self.conn.fileno()
-            except Exception:
-                self.retry()
-                pass
-
-    def select_read(self, timeout):
-        while True:
-            try:
-                return select.select([self.conn.fileno()], [], [], timeout)
-            except Exception as ex:
-                self.retry()
-                pass
-
-    def inWaiting(self):
-        return self.conn.inWaiting()
-
-    def flushInput(self):
-        return self.conn.flushInput()
-
-    def close(self):
-        self.conn.close()
-        self.conn = None
-    
 class IPCCommandLineExecutionRequest:
     DEFAULT_TIMEOUT = 1
 
@@ -225,7 +147,7 @@ class RxWorker:
             ts_mono = time.monotonic()
             ts_real = time.time()
         else:
-            self._conn.select_read(self.SELECT_TIMEOUT)
+            select.select([self._conn.fileno()], [], [], self.SELECT_TIMEOUT)
             # Timestamping as soon as possible after unblocking
             ts_mono = time.monotonic()
             ts_real = time.time()
@@ -240,28 +162,23 @@ class RxWorker:
         if line_len < 1:
             return
 
-        canfd = False
         # Checking the header, ignore all irrelevant lines
         if line[0] == b'T'[0]:
             id_len = 8
         elif line[0] == b't'[0]:
             id_len = 3
-        elif line[0] == b'D'[0]:
-            id_len = 8
-            canfd = True
         else:
             return
 
         # Parsing ID and DLC
         packet_id = int(line[1:1 + id_len], 16)
-        packet_len = CANFrame.dlc_to_datalength(int(chr(line[1 + id_len]), 16))
-
-        if canfd:
-            if packet_len > 64 or packet_len < 0:
-                raise DriverError('Invalid packet length')
+        if self.PY2_COMPAT:
+            packet_len = int(line[1 + id_len])              # This version is horribly slow
         else:
-            if packet_len > 8 or packet_len < 0:
-                raise DriverError('Invalid packet length', packet_len, line[1 + id_len])
+            packet_len = line[1 + id_len] - 48              # Py3 version is faster
+
+        if packet_len > 8 or packet_len < 0:
+            raise DriverError('Invalid packet length')
 
         # Parsing the payload, detecting timestamp
         # <type> <id> <dlc> <data>         [timestamp]
@@ -279,7 +196,7 @@ class RxWorker:
             ts_mono = local_ts_mono
             ts_real = local_ts_real
 
-        frame = CANFrame(packet_id, packet_data, (id_len == 8), ts_monotonic=ts_mono, ts_real=ts_real, canfd=canfd)
+        frame = CANFrame(packet_id, packet_data, (id_len == 8), ts_monotonic=ts_mono, ts_real=ts_real)
         self._output_queue.put_nowait(frame)
 
     def _process_many_slcan_lines(self, lines, ts_mono, ts_real):
@@ -408,10 +325,8 @@ class TxWorker:
         self._termination_condition = termination_condition
 
     def _send_frame(self, frame):
-        marker = 'D' if frame.canfd else 'T'
-        dlc_len = CANFrame.datalength_to_dlc(len(frame.data))
-        line = '%s%X%s\r' % (('%c%08X' if frame.extended else 't%03X') % (marker, frame.id),
-                             dlc_len,
+        line = '%s%d%s\r' % (('T%08X' if frame.extended else 't%03X') % frame.id,
+                             len(frame.data),
                              binascii.b2a_hex(frame.data).decode('ascii'))
 
         self._conn.write(line.encode('ascii'))
@@ -559,8 +474,7 @@ def _io_process(device,
                 baudrate=None,
                 max_adapter_clock_rate_error_ppm=None,
                 fixed_rx_delay=None,
-                max_estimated_rx_delay_to_resync=None,
-                auto_reopen=True):
+                max_estimated_rx_delay_to_resync=None):
     try:
         # noinspection PyUnresolvedReferences
         from logging.handlers import QueueHandler
@@ -630,10 +544,7 @@ def _io_process(device,
     rxthd.daemon = True
 
     try:
-        if auto_reopen:
-            conn = RetrySerial(device, baudrate or DEFAULT_BAUDRATE, bitrate)
-        else:
-            conn = serial.Serial(device, baudrate or DEFAULT_BAUDRATE)
+        conn = serial.Serial(device, baudrate or DEFAULT_BAUDRATE)
     except Exception as ex:
         logger.error('Could not open port', exc_info=True)
         rx_queue.put(ex)
@@ -858,9 +769,9 @@ class SLCAN(AbstractDriver):
                 if time.monotonic() >= deadline:
                     return
 
-    def send(self, message_id, message, extended=False, canfd=False):
+    def send(self, message_id, message, extended=False):
         self._check_alive()
-        frame = CANFrame(message_id, message, extended, canfd=canfd)
+        frame = CANFrame(message_id, message, extended)
         try:
             self._tx_queue.put_nowait(frame)
         except queue.Full:
